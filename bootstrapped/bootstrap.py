@@ -13,6 +13,8 @@ from __future__ import unicode_literals
 import numpy as _np
 import multiprocessing as _multiprocessing
 import scipy.sparse as _sparse
+from . import compare_functions as bs_compare
+
 
 class BootstrapResults(object):
     def __init__(self, lower_bound, value, upper_bound):
@@ -75,7 +77,7 @@ class BootstrapResults(object):
         return int(self.is_significant()) * _np.sign(self.value)
 
 
-def _get_confidence_interval(bootstrap_dist, stat_val, alpha, is_pivotal):
+def _get_confidence_interval(bootstrap_dist, stat_val, alpha, is_pivotal, is_two_sided=True):
     '''Get the bootstrap confidence interval for a given distribution.
     Args:
         bootstrap_distribution: numpy array of bootstrap results from
@@ -86,16 +88,24 @@ def _get_confidence_interval(bootstrap_dist, stat_val, alpha, is_pivotal):
         is_pivotal: if true, use the pivotal method. if false, use the
             percentile method.
     '''
+    high_q = 1 - alpha / 2. if is_two_sided else 1 - alpha
+    low_q = alpha / 2. if is_two_sided else alpha
     if is_pivotal:
-        low = 2 * stat_val - _np.percentile(bootstrap_dist, 100 * (1 - alpha / 2.))
+        low = 2 * stat_val - _np.quantile(bootstrap_dist, high_q)
         val = stat_val
-        high = 2 * stat_val - _np.percentile(bootstrap_dist, 100 * (alpha / 2.))
+        high = 2 * stat_val - _np.quantile(bootstrap_dist, low_q)
     else:
-        low = _np.percentile(bootstrap_dist, 100 * (alpha / 2.))
-        val = _np.percentile(bootstrap_dist, 50)
-        high = _np.percentile(bootstrap_dist, 100 * (1 - alpha / 2.))
+        low = _np.quantile(bootstrap_dist, low_q)
+        val = _np.quantile(bootstrap_dist, 50)
+        high = _np.quantile(bootstrap_dist, high_q)
 
     return BootstrapResults(low, val, high)
+
+
+def _get_p_value(test_statistics_dist, t0, is_two_sided=True):
+    p_hat = _np.mean(test_statistics_dist >= t0)
+    p_value = 2 * min(p_hat, 1 - p_hat) if is_two_sided else p_hat
+    return p_value
 
 
 def _needs_sparse_unification(values_lists):
@@ -360,7 +370,8 @@ def bootstrap(values, stat_func, denominator_values=None, alpha=0.05,
 def bootstrap_ab(test, ctrl, stat_func, compare_func, test_denominator=None,
                  ctrl_denominator=None, alpha=0.05, num_iterations=10000,
                  iteration_batch_size=None, scale_test_by=1.0,
-                 is_pivotal=True, num_threads=1, return_distribution=False):
+                 is_pivotal=True, num_threads=1, return_distribution=False,
+                 compute_p_value=False, delta=0.0, is_two_sided=True):
     '''Returns bootstrap confidence intervals for an A/B test.
     Args:
         test: numpy array (or scipy.sparse.csr_matrix) of test results
@@ -407,8 +418,7 @@ def bootstrap_ab(test, ctrl, stat_func, compare_func, test_denominator=None,
         BootstrapResults representing CI and estimated value.
     '''
 
-    both_denominators = test_denominator is not None and \
-            ctrl_denominator is not None
+    both_denominators = test_denominator is not None and ctrl_denominator is not None
     both_numerators = test is not None and ctrl is not None
 
     if both_numerators and not both_denominators:
@@ -454,7 +464,54 @@ def bootstrap_ab(test, ctrl, stat_func, compare_func, test_denominator=None,
     if return_distribution:
         return test_ctrl_dist
     else:
-
         test_ctrl_val = compare_func(test_val * scale_test_by, ctrl_val)
-        return _get_confidence_interval(test_ctrl_dist, test_ctrl_val, alpha,
-                                        is_pivotal)
+        ci = _get_confidence_interval(test_ctrl_dist, test_ctrl_val, alpha, is_pivotal, is_two_sided)
+        if compute_p_value:
+            if compare_func is bs_compare.percent_change:
+                shift = (delta / 100) * ctrl_val
+            elif compare_func is bs_compare.difference:
+                shift = delta
+            else:
+                raise ValueError('p-value only support {} and {} as the compare function, got {} instead.'.format(
+                    bs_compare.difference.__name__,
+                    bs_compare.percent_change.__name__,
+                    compare_func.__name__
+                ))
+            test_dist_shift = test_dist - _np.mean(test_dist) + shift  # shift to null distribution for computing p-value
+            ctrl_dist_shift = ctrl_dist - _np.mean(ctrl_dist)  # shift to null distribution for computing p-value
+            test_stat_dist = test_dist_shift - ctrl_dist_shift  # use mean difference as test statistics
+            t0 = test_val - ctrl_val
+            p_value = _get_p_value(test_stat_dist, t0, is_two_sided)
+            return ci, p_value
+        else:
+            return ci
+
+
+# def main():
+#     import stats_functions as bs_stats
+#     lift = 1.01
+#     # delta = 20000.
+#     delta = 1.
+#     count_ci = 0
+#     count_p_value = 0
+#     times = 10000
+#     for i in range(times):
+#         test = _np.random.binomial(100, p=0.2 * lift, size=10000)
+#         ctrl = _np.random.binomial(100, p=0.2, size=10000)
+#         ci, p_value = bootstrap_ab(test, ctrl, bs_stats.sum, bs_compare.percent_change,
+#                                    num_threads=8, num_iterations=10000,
+#                                    compute_p_value=True, delta=delta, is_two_sided=False, is_pivotal=True)
+#         if p_value < 0.05:
+#             count_p_value += 1
+#         if ci.lower_bound > delta:
+#             count_ci += 1
+#         if (i + 1) % 10 == 0:
+#             print('{} / {}'.format(i + 1, times))
+#             print('count_ci: {}'.format(count_ci))
+#             print('count_p_value: {}'.format(count_p_value))
+#     print('count ci: {}'.format(count_ci))
+#     print('count p-value: {}'.format(count_p_value))
+#
+#
+# if __name__ == '__main__':
+#     main()

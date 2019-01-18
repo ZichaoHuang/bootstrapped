@@ -19,7 +19,7 @@ def difference(test_stat, ctrl_stat):
     Returns:
         test_stat - ctrl_stat
     """
-    return (test_stat - ctrl_stat)
+    return test_stat - ctrl_stat
 
 
 def percent_change(test_stat, ctrl_stat):
